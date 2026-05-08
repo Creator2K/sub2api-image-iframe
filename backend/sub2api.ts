@@ -48,8 +48,16 @@ async function parseJsonResponse<T>(res: Awaited<ReturnType<typeof request>>): P
   return payload as T
 }
 
+async function sub2Request(path: string, options: Parameters<typeof request>[1]) {
+  return request(`${config.sub2apiBaseUrl}${path}`, {
+    bodyTimeout: config.chatgpt2apiTimeoutMs,
+    headersTimeout: config.chatgpt2apiTimeoutMs,
+    ...options,
+  })
+}
+
 export async function sub2UserByJwt(userId: string, jwt: string): Promise<Sub2User> {
-  const res = await request(`${config.sub2apiBaseUrl}/api/v1/user/profile`, {
+  const res = await sub2Request('/api/v1/user/profile', {
     method: 'GET',
     headers: { Authorization: `Bearer ${jwt}` },
   })
@@ -61,7 +69,7 @@ export async function sub2UserByJwt(userId: string, jwt: string): Promise<Sub2Us
 }
 
 async function userGet<T>(jwt: string, path: string): Promise<T> {
-  const res = await request(`${config.sub2apiBaseUrl}${path}`, {
+  const res = await sub2Request(path, {
     method: 'GET',
     headers: { Authorization: `Bearer ${jwt}` },
   })
@@ -69,7 +77,7 @@ async function userGet<T>(jwt: string, path: string): Promise<T> {
 }
 
 async function userJson<T>(jwt: string, method: 'POST' | 'PUT', path: string, body: unknown): Promise<T> {
-  const res = await request(`${config.sub2apiBaseUrl}${path}`, {
+  const res = await sub2Request(path, {
     method,
     headers: {
       Authorization: `Bearer ${jwt}`,
@@ -91,17 +99,28 @@ export async function getAvailableImageGroups(jwt: string): Promise<Sub2Group[]>
   return groups.filter((g) => g.platform === 'openai' && g.status === 'active' && g.allow_image_generation !== false)
 }
 
+export async function listUserApiKeys(jwt: string): Promise<Sub2ApiKey[]> {
+  const list = await userGet<any>(jwt, '/api/v1/keys?page=1&page_size=100')
+  return unwrapItems<Sub2ApiKey>(list).filter((k) => k.status === 'active')
+}
+
+export async function getUserApiKeyById(jwt: string, userId: string, keyId: number): Promise<Sub2ApiKey> {
+  const keys = await listUserApiKeys(jwt)
+  const key = keys.find((k) => k.id === keyId && String(k.user_id) === String(userId))
+  if (!key) throw new Error('未找到当前用户的可用 API Key')
+  return key
+}
+
 export async function ensureUserImageApiKey(jwt: string, userId: string): Promise<{ apiKey: Sub2ApiKey; group: Sub2Group; created: boolean }> {
   const userGroups = await getAvailableImageGroups(jwt)
-  const group = userGroups.find((g) => g.name === config.imageGroupName) || userGroups[0]
+  const group = userGroups.find((g) => Number(g.id) === config.imageGroupId)
 
   if (!group) {
-    throw new Error(`当前用户没有可用的 OpenAI 生图分组。请管理员在 Sub2API 后台创建/启用 openai 生图分组（建议命名为 ${config.imageGroupName}），并确保该用户可见或拥有对应订阅。`)
+    throw new Error(`当前用户没有可用的 OpenAI 生图分组。请确认 group_id=${config.imageGroupId} 的分组已启用，并且该用户可见或拥有对应订阅。`)
   }
 
-  const list = await userGet<any>(jwt, '/api/v1/keys?page=1&page_size=100')
-  const keys = unwrapItems<Sub2ApiKey>(list)
-  const existing = keys.find((k) => k.status === 'active' && k.group_id === group.id)
+  const keys = await listUserApiKeys(jwt)
+  const existing = keys.find((k) => k.group_id === group.id)
   if (existing) return { apiKey: existing, group, created: false }
 
   if (!config.autoCreateKey) {
@@ -113,4 +132,12 @@ export async function ensureUserImageApiKey(jwt: string, userId: string): Promis
     group_id: group.id,
   })
   return { apiKey: created, group, created: true }
+}
+
+
+export async function createUserApiKeyForGroup(jwt: string, groupId: number, name?: string): Promise<Sub2ApiKey> {
+  return userJson<Sub2ApiKey>(jwt, 'POST', '/api/v1/keys', {
+    name: name || config.imageKeyName,
+    group_id: groupId,
+  })
 }

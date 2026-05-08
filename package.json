@@ -16,9 +16,11 @@
     "@fastify/cors": "^10.0.1",
     "@fastify/multipart": "^9.0.3",
     "@fastify/static": "^8.0.3",
+    "@vueuse/motion": "^3.0.3",
     "dotenv": "^16.4.7",
     "fastify": "^5.1.0",
     "form-data": "^4.0.1",
+    "framer-motion": "^12.38.0",
     "nanoid": "^5.0.9",
     "undici": "^7.2.3"
   },
@@ -26,9 +28,9 @@
     "@types/node": "^22.10.2",
     "@vitejs/plugin-vue": "^5.2.1",
     "concurrently": "^9.1.0",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
-    "vue": "^3.5.13",
-    "tsx": "^4.19.2"
+    "vue": "^3.5.13"
   }
 }

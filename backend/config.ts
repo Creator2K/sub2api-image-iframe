@@ -35,6 +35,7 @@ export const config = {
 
   sub2apiBaseUrl: cleanBaseUrl(process.env.SUB2API_BASE_URL || 'http://localhost:8080'),
   imageGroupName: process.env.SUB2API_IMAGE_GROUP_NAME || 'OpenAI生图',
+  imageGroupId: num('SUB2API_IMAGE_GROUP_ID', 3),
   imageKeyName: process.env.SUB2API_IMAGE_KEY_NAME || 'OpenAI生图',
   autoCreateKey: bool('SUB2API_AUTO_CREATE_KEY', true),
 

@@ -7,8 +7,13 @@ import fs from 'node:fs/promises'
 import { request } from 'undici'
 import { config } from './config.js'
 import { ensureDataDirs, readHistory, addHistory, publicHistoryUrl } from './history.js'
-import { ensureUserImageApiKey, sub2UserByJwt } from './sub2api.js'
-import { generateImage, editImage } from './chatgpt2api.js'
+import { createUserApiKeyForGroup, ensureUserImageApiKey, getUserApiKeyById, listUserApiKeys, sub2UserByJwt } from './sub2api.js'
+import { generateImage, editImage, listModels } from './chatgpt2api.js'
+
+const IMAGE_MODEL = 'gpt-image-2'
+const ALLOWED_IMAGE_SIZES = new Set(['1024x1024', '1536x864', '1440x1080', '1080x1440', '864x1536'])
+const ALLOWED_IMAGE_QUALITIES = new Set(['1K', '2K', '4K'])
+const ALLOWED_EDIT_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
 interface SessionQuery {
   user_id?: string
@@ -30,23 +35,78 @@ async function validatedSession(req: any) {
   return { ...session, user }
 }
 
-function mapHistoryResponse(userId: string, items: any[]) {
-  return items.map((item) => ({
-    ...item,
-    proxiedUrl: item.proxiedUrl || publicHistoryUrl(userId, item.id),
-  }))
+function publicKeyInfo(k: any) {
+  return {
+    id: k.id,
+    name: k.name,
+    group_id: k.group_id,
+    status: k.status,
+    group: k.group ? { id: k.group.id, name: k.group.name, platform: k.group.platform } : undefined,
+  }
 }
 
-async function resolveImageApiKey(token: string, userId: string, manualApiKey?: unknown): Promise<string> {
+function mapHistoryResponse(userId: string, items: any[]) {
+  return items.map((item) => ({ ...item, proxiedUrl: item.proxiedUrl || publicHistoryUrl(userId, item.id) }))
+}
+
+async function resolveImageApiKey(token: string, userId: string, selectedApiKeyId?: unknown, manualApiKey?: unknown): Promise<string> {
   const manual = String(manualApiKey || '').trim()
-  if (manual) return manual
+  if (manual) {
+    await assertPureImageKey(manual)
+    return manual
+  }
+  const id = Number(selectedApiKeyId || 0)
+  if (id > 0) {
+    const selected = await getUserApiKeyById(token, userId, id)
+    if (Number(selected.group_id) !== config.imageGroupId) {
+      throw Object.assign(new Error('此密钥不是正确的分组，请选择正确的分组'), { statusCode: 403 })
+    }
+    await assertPureImageKey(selected.key)
+    return selected.key
+  }
   const ensured = await ensureUserImageApiKey(token, userId)
+  if (Number(ensured.apiKey.group_id) !== config.imageGroupId) {
+    throw Object.assign(new Error('此密钥不是正确的分组，请选择正确的分组'), { statusCode: 403 })
+  }
+  await assertPureImageKey(ensured.apiKey.key)
   return ensured.apiKey.key
+}
+
+async function assertPureImageKey(apiKey: string) {
+  const models = await listModels(apiKey)
+  if (models.length !== 1 || models[0] !== IMAGE_MODEL) {
+    throw Object.assign(new Error('此密钥不是正确的分组，请选择正确的分组'), { statusCode: 403 })
+  }
+}
+
+function normalizeImageParams(payload: Record<string, any>, mode: 'generations' | 'edits') {
+  const out: Record<string, any> = { ...payload }
+  if (!out.size || out.size === 'auto') delete out.size
+  else if (!ALLOWED_IMAGE_SIZES.has(String(out.size))) throw Object.assign(new Error('Invalid image size'), { statusCode: 400 })
+  if (!out.quality || out.quality === 'auto') delete out.quality
+  else if (!ALLOWED_IMAGE_QUALITIES.has(String(out.quality))) throw Object.assign(new Error('Invalid image quality'), { statusCode: 400 })
+  const n = Number(out.n || 1)
+  if (!Number.isInteger(n) || n < 1 || n > 1) throw Object.assign(new Error('Only n=1 is allowed'), { statusCode: 400 })
+  out.n = 1
+  out.model = IMAGE_MODEL
+  delete out.style
+  delete out.response_format
+  delete out.user
+  if (mode === 'edits') {
+    delete out.mask
+  }
+  if (out.api_key_id != null && !Number.isInteger(Number(out.api_key_id))) {
+    throw Object.assign(new Error('Invalid API Key'), { statusCode: 400 })
+  }
+  return out
+}
+
+function toPublicHistoryUserId(userId: string): string {
+  return String(userId || 'anonymous').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)
 }
 
 async function main() {
   await ensureDataDirs()
-
   const app = Fastify({ logger: true, bodyLimit: 25 * 1024 * 1024 })
 
   await app.register(cors, {
@@ -61,23 +121,44 @@ async function main() {
 
   app.get<{ Querystring: SessionQuery }>('/api/session', async (req) => {
     const { userId, token, user } = await validatedSession(req)
+    let apiKeys: any[] = []
     let ensured: Awaited<ReturnType<typeof ensureUserImageApiKey>> | null = null
     let apiKeyError = ''
     try {
       ensured = await ensureUserImageApiKey(token, userId)
+      apiKeys = await listUserApiKeys(token)
     } catch (error: any) {
       apiKeyError = error?.message || String(error)
+      try { apiKeys = await listUserApiKeys(token) } catch {}
     }
     const history = await readHistory(userId)
     return {
       user,
-      imageGroup: ensured?.group || null,
-      imageKey: ensured
-        ? { id: ensured.apiKey.id, name: ensured.apiKey.name, group_id: ensured.apiKey.group_id, created: ensured.created }
-        : null,
+      imageGroup: ensured?.group || { id: config.imageGroupId, name: config.imageGroupName },
+      imageKey: ensured ? { ...publicKeyInfo(ensured.apiKey), created: ensured.created } : null,
+      apiKeys: apiKeys.map(publicKeyInfo),
       apiKeyError,
       history: mapHistoryResponse(userId, history),
     }
+  })
+
+
+
+  app.post<{ Body: { group_id?: number; name?: string }; Querystring: SessionQuery }>('/api/keys', async (req) => {
+    const { token } = await validatedSession(req)
+    const groupId = Number(req.body?.group_id || 0)
+    if (!groupId) throw Object.assign(new Error('group_id is required'), { statusCode: 400 })
+    if (groupId !== config.imageGroupId) throw Object.assign(new Error('Only image group can be created here'), { statusCode: 400 })
+    const key = await createUserApiKeyForGroup(token, groupId, req.body?.name)
+    return { key: publicKeyInfo(key) }
+  })
+
+  app.get<{ Params: { id: string }; Querystring: SessionQuery }>('/api/keys/:id/models', async (req) => {
+    const { userId, token } = await validatedSession(req)
+    const key = await getUserApiKeyById(token, userId, Number(req.params.id))
+    const models = await listModels(key.key)
+    const supportsImage2 = Number(key.group_id) === config.imageGroupId && models.length === 1 && models[0] === IMAGE_MODEL
+    return { models, supportsImage2 }
   })
 
   app.get<{ Querystring: SessionQuery }>('/api/history', async (req) => {
@@ -86,6 +167,9 @@ async function main() {
   })
 
   app.get<{ Params: { userId: string; itemId: string } }>('/api/history/:userId/:itemId/image', async (req, reply) => {
+    if (req.params.userId !== toPublicHistoryUserId(req.params.userId)) {
+      return reply.code(400).send({ error: 'invalid user id' })
+    }
     const items = await readHistory(req.params.userId)
     const item = items.find((x) => x.id === req.params.itemId)
     if (!item) return reply.code(404).send({ error: 'not found' })
@@ -96,27 +180,28 @@ async function main() {
       reply.header('content-type', match[1])
       return reply.send(buf)
     }
-    const upstream = await request(item.imageUrl, { method: 'GET', bodyTimeout: 60000, headersTimeout: 60000 })
-    reply.code(upstream.statusCode)
-    const contentType = upstream.headers['content-type']
-    if (contentType) reply.header('content-type', contentType)
-    return reply.send(upstream.body)
+    try {
+      const upstream = await request(item.imageUrl, { method: 'GET', bodyTimeout: 60000, headersTimeout: 60000 })
+      reply.code(upstream.statusCode)
+      const contentType = upstream.headers['content-type']
+      if (contentType) reply.header('content-type', contentType)
+      return reply.send(upstream.body)
+    } catch (error: any) {
+      req.log.warn({ err: error, itemId: req.params.itemId }, 'failed to proxy history image')
+      return reply.code(502).send({ error: 'failed to load history image' })
+    }
   })
 
   app.post<{ Body: any; Querystring: SessionQuery }>('/api/images/generations', async (req) => {
     const { userId, token } = await validatedSession(req)
-    const payload = (req.body || {}) as Record<string, any>
+    const payload = normalizeImageParams((req.body || {}) as Record<string, any>, 'generations')
     const prompt = String(payload.prompt || '').trim()
     if (!prompt) throw Object.assign(new Error('Prompt is required'), { statusCode: 400 })
-    const apiKey = await resolveImageApiKey(token, userId, payload.manual_api_key)
+    const apiKey = await resolveImageApiKey(token, userId, payload.api_key_id, payload.manual_api_key)
     const images = await generateImage(apiKey, { ...payload, prompt })
     const history = await addHistory(userId, images.map((img) => ({
-      endpoint: 'generations',
-      prompt,
-      model: payload.model || 'gpt-image-2',
-      imageUrl: img.imageUrl,
-      mimeType: img.mimeType,
-      revisedPrompt: img.revisedPrompt,
+      endpoint: 'generations', prompt, model: IMAGE_MODEL, imageUrl: img.imageUrl,
+      mimeType: img.mimeType, revisedPrompt: img.revisedPrompt,
     })))
     return { images, history: mapHistoryResponse(userId, history) }
   })
@@ -125,23 +210,34 @@ async function main() {
     const { userId, token } = await validatedSession(req)
     const parts = req.parts()
     const fields: Record<string, any> = {}
-    let imageFile: any = null
+    let imageFile: { buffer: Buffer; filename?: string; mimetype?: string } | null = null
     for await (const part of parts) {
-      if (part.type === 'file' && part.fieldname === 'image') imageFile = part
-      else if (part.type === 'field') fields[part.fieldname] = part.value
+      if (part.type === 'file' && part.fieldname === 'image') {
+        req.log.info({ filename: part.filename, mimetype: part.mimetype }, 'edit image upload received')
+        if (!ALLOWED_EDIT_MIME_TYPES.has(part.mimetype)) {
+          throw Object.assign(new Error('Only PNG / JPG / WebP images are allowed'), { statusCode: 400 })
+        }
+        imageFile = {
+          buffer: await part.toBuffer(),
+          filename: part.filename,
+          mimetype: part.mimetype,
+        }
+        req.log.info({ bytes: imageFile.buffer.length }, 'edit image upload buffered')
+      } else if (part.type === 'field') {
+        fields[part.fieldname] = part.value
+      }
     }
-    const prompt = String(fields.prompt || '').trim()
+    const payload = normalizeImageParams(fields, 'edits')
+    const prompt = String(payload.prompt || '').trim()
     if (!prompt) throw Object.assign(new Error('Edit prompt is required'), { statusCode: 400 })
     if (!imageFile) throw Object.assign(new Error('Image file is required'), { statusCode: 400 })
-    const apiKey = await resolveImageApiKey(token, userId, fields.manual_api_key)
-    const images = await editImage(apiKey, { ...fields, prompt }, imageFile)
+    const apiKey = await resolveImageApiKey(token, userId, payload.api_key_id, payload.manual_api_key)
+    req.log.info({ fields: Object.keys(payload), imageBytes: imageFile.buffer.length }, 'calling image edit api')
+    const images = await editImage(apiKey, { ...payload, prompt }, imageFile)
+    req.log.info({ count: images.length }, 'image edit api completed')
     const history = await addHistory(userId, images.map((img) => ({
-      endpoint: 'edits',
-      prompt,
-      model: fields.model || 'gpt-image-2',
-      imageUrl: img.imageUrl,
-      mimeType: img.mimeType,
-      revisedPrompt: img.revisedPrompt,
+      endpoint: 'edits', prompt, model: IMAGE_MODEL, imageUrl: img.imageUrl,
+      mimeType: img.mimeType, revisedPrompt: img.revisedPrompt,
     })))
     return { images, history: mapHistoryResponse(userId, history) }
   })
