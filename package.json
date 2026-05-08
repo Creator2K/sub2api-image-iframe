@@ -1,0 +1,34 @@
+{
+  "name": "sub2api-image-iframe-app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c cyan,magenta \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "tsx watch backend/server.ts",
+    "dev:frontend": "vite --host 0.0.0.0 --port 5179 frontend",
+    "build": "vite build frontend --outDir ../dist/public",
+    "start": "node dist/server.js",
+    "build:backend": "tsc -p tsconfig.json",
+    "build:all": "npm run build && npm run build:backend"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "@fastify/multipart": "^9.0.3",
+    "@fastify/static": "^8.0.3",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.1.0",
+    "form-data": "^4.0.1",
+    "nanoid": "^5.0.9",
+    "undici": "^7.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vue": "^3.5.13",
+    "tsx": "^4.19.2"
+  }
+}
