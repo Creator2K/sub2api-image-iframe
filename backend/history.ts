@@ -13,6 +13,7 @@ export interface ImageHistoryItem {
   endpoint: 'generations' | 'edits'
   imageUrl: string
   proxiedUrl?: string
+  accessToken?: string
   mimeType?: string
   revisedPrompt?: string
   createdAt: string
@@ -77,12 +78,13 @@ export async function addHistory(userId: string, items: Omit<ImageHistoryItem, '
   await fs.mkdir(dir, { recursive: true })
   const existing = await readHistory(userId)
   const now = new Date().toISOString()
-  const created = items.map((item) => ({ ...item, id: nanoid(12), userId: String(userId), createdAt: now }))
+  const created = items.map((item) => ({ ...item, id: nanoid(12), userId: String(userId), accessToken: nanoid(24), createdAt: now }))
   const next = pruneHistory([...created, ...existing]).slice(0, limit)
   await fs.writeFile(historyPath(userId), JSON.stringify(next, null, 2), 'utf8')
   return next
 }
 
-export function publicHistoryUrl(userId: string, itemId: string): string {
-  return `${config.publicBaseUrl}/api/history/${encodeURIComponent(userId)}/${encodeURIComponent(itemId)}/image`
+export function publicHistoryUrl(userId: string, itemId: string, accessToken?: string): string {
+  const base = `${config.publicBaseUrl}/api/history/${encodeURIComponent(userId)}/${encodeURIComponent(itemId)}/image`
+  return accessToken ? `${base}?access_token=${encodeURIComponent(accessToken)}` : base
 }

@@ -71,8 +71,9 @@ function publicKeyInfo(k: any) {
 function mapHistoryResponse(userId: string, items: any[]) {
   return items.map((item) => {
     const itemUserId = String(item?.userId || userId)
-    const proxiedUrl = item.proxiedUrl || publicHistoryUrl(itemUserId, item.id)
-    return { ...item, imageUrl: proxiedUrl, proxiedUrl }
+    const proxiedUrl = item.proxiedUrl || publicHistoryUrl(itemUserId, item.id, item.accessToken)
+    const { accessToken: _accessToken, ...publicItem } = item
+    return { ...publicItem, imageUrl: proxiedUrl, proxiedUrl }
   })
 }
 
@@ -80,10 +81,15 @@ function publicImagesFromHistory(userId: string, history: any[], count: number) 
   return mapHistoryResponse(userId, history)
     .slice(0, count)
     .map((item) => ({
+      id: item.id,
       imageUrl: item.proxiedUrl,
       proxiedUrl: item.proxiedUrl,
+      prompt: item.prompt,
+      model: item.model,
+      endpoint: item.endpoint,
       mimeType: item.mimeType,
       revisedPrompt: item.revisedPrompt,
+      createdAt: item.createdAt,
     }))
 }
 
@@ -248,12 +254,12 @@ function toPublicHistoryUserId(userId: string): string {
 function sanitizeRequestUrl(rawUrl: string) {
   try {
     const url = new URL(rawUrl, 'http://local')
-    for (const key of ['token', 'api_key', 'manual_api_key', 'key']) {
+    for (const key of ['token', 'access_token', 'api_key', 'manual_api_key', 'key']) {
       if (url.searchParams.has(key)) url.searchParams.set(key, '[redacted]')
     }
     return `${url.pathname}${url.search}`
   } catch {
-    return rawUrl.replace(/([?&](?:token|api_key|manual_api_key|key)=)[^&]+/gi, '$1[redacted]')
+    return rawUrl.replace(/([?&](?:token|access_token|api_key|manual_api_key|key)=)[^&]+/gi, '$1[redacted]')
   }
 }
 
@@ -361,6 +367,9 @@ async function main() {
     const items = await readHistory(req.params.userId)
     const item = items.find((x) => x.id === req.params.itemId)
     if (!item) return reply.code(404).send({ error: 'not found' })
+    if (item.accessToken && req.query && (req.query as any).access_token !== item.accessToken) {
+      return reply.code(403).send({ error: 'forbidden' })
+    }
     if (item.imageUrl.startsWith('data:')) {
       const match = item.imageUrl.match(/^data:([^;]+);base64,(.*)$/)
       if (!match) return reply.code(404).send({ error: 'invalid data url' })

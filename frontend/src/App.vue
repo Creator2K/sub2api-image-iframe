@@ -26,10 +26,15 @@ interface HistoryItem {
 }
 
 interface PreviewImage {
+  id?: string
   imageUrl: string
   proxiedUrl?: string
+  prompt?: string
+  model?: string
+  endpoint?: Endpoint
   mimeType?: string
   revisedPrompt?: string
+  createdAt?: string
 }
 
 interface SessionState {
@@ -210,6 +215,8 @@ async function loadSession() {
     const data = await fetch('/api/session', { headers: authHeaders() }).then(parseResponse)
     Object.assign(session, data)
     selectedImage.value = null
+    previewImages.value = []
+    previewIndex.value = 0
     showManualKey.value = false
     if (apiKeys.value.length > 0) {
       selectedApiKeyId.value = String(apiKeys.value[0].id)
@@ -242,6 +249,9 @@ async function refreshHistory() {
   if (sessionError.value) return
   const data = await fetch('/api/history', { headers: authHeaders() }).then(parseResponse)
   session.history = data.items || []
+  previewImages.value = []
+  previewIndex.value = 0
+  selectedImage.value = null
 }
 
 function sleep(ms: number) {
@@ -273,6 +283,17 @@ async function waitForJob(jobId: string) {
 function imageSrc(item: HistoryItem) { return item.proxiedUrl || item.imageUrl }
 function previewSrc(item: PreviewImage) { return item.proxiedUrl || item.imageUrl }
 function currentPreviewImage() { return previewImages.value[previewIndex.value] || null }
+function currentPreviewHistoryItem() {
+  if (previewImages.value.length > 0) {
+    const preview = currentPreviewImage()
+    if (preview?.id) {
+      const byId = session.history.find((item) => item.id === preview.id)
+      if (byId) return byId
+    }
+    return session.history[previewIndex.value] || session.history[0] || null
+  }
+  return selectedImage.value
+}
 function showPreviousImage() {
   if (previewImages.value.length <= 1) return
   previewIndex.value = (previewIndex.value - 1 + previewImages.value.length) % previewImages.value.length
@@ -369,8 +390,23 @@ function viewPrompt(item: HistoryItem) {
   showingPromptText.value = item.prompt
   showingPrompt.value = true
 }
-function currentPreviewHistoryItem() {
-  return selectedImage.value || session.history[0] || null
+function closePreview() {
+  previewImages.value = []
+  previewIndex.value = 0
+  selectedImage.value = null
+}
+function selectHistoryImage(item: HistoryItem) {
+  previewImages.value = []
+  previewIndex.value = 0
+  selectedImage.value = item
+}
+function viewCurrentPrompt() {
+  const item = currentPreviewHistoryItem()
+  if (item) viewPrompt(item)
+}
+function downloadCurrentImage() {
+  const item = currentPreviewHistoryItem()
+  if (item) downloadImage(item)
 }
 function onHistoryWheel(e: WheelEvent) {
   if (e.deltaY !== 0) {
@@ -475,9 +511,9 @@ onMounted(() => {
             <h2>{{ t.waitingImage }}</h2><p>{{ t.resultHere }}</p>
           </div>
           <div v-if="(latestImage || currentPreviewImage()) && !generating" class="preview-actions">
-            <button class="action-btn" type="button" @click="viewPrompt(currentPreviewHistoryItem() as HistoryItem)" v-motion-pop-visible>查看提示词</button>
-            <button class="action-btn" type="button" @click="selectedImage = null" v-motion-pop-visible>关闭预览</button>
-            <button class="action-btn" type="button" @click="downloadImage(currentPreviewHistoryItem() as HistoryItem)" v-motion-pop-visible>{{ t.downloadOpen }}</button>
+            <button class="action-btn" type="button" @click="viewCurrentPrompt" v-motion-pop-visible>查看提示词</button>
+            <button class="action-btn" type="button" @click="closePreview" v-motion-pop-visible>关闭预览</button>
+            <button class="action-btn" type="button" @click="downloadCurrentImage" v-motion-pop-visible>{{ t.downloadOpen }}</button>
             <button class="action-btn" type="button" @click="refreshHistory" v-motion-pop-visible>{{ t.refreshHistory }}</button>
           </div>
         </div>
@@ -488,7 +524,7 @@ onMounted(() => {
           </div>
           <div v-if="session.history.length === 0" class="empty-history">{{ t.noHistory }}</div>
           <div v-else class="history-list" @wheel="onHistoryWheel">
-            <button v-show="!failedImageIds.has(item.id)" v-for="(item, index) in session.history" :key="item.id" type="button" class="history-item" :class="{ active: latestImage?.id === item.id }" @click="selectedImage = item" v-motion :initial="{ opacity: 0, x: 20 }" :enter="{ opacity: 1, x: 0, transition: { delay: index * 100 } }">
+            <button v-show="!failedImageIds.has(item.id)" v-for="(item, index) in session.history" :key="item.id" type="button" class="history-item" :class="{ active: currentPreviewHistoryItem()?.id === item.id }" @click="selectHistoryImage(item)" v-motion :initial="{ opacity: 0, x: 20 }" :enter="{ opacity: 1, x: 0, transition: { delay: index * 100 } }">
               <img :src="imageSrc(item)" alt="history" @error="failedImageIds.add(item.id)" /><span>{{ item.prompt }}</span>
             </button>
           </div>
