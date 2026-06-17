@@ -3,6 +3,8 @@ import path from 'node:path'
 import { nanoid } from 'nanoid'
 import { config } from './config.js'
 
+const HISTORY_TTL_MS = 24 * 60 * 60 * 1000
+
 export interface ImageHistoryItem {
   id: string
   userId: string
@@ -16,7 +18,7 @@ export interface ImageHistoryItem {
   createdAt: string
 }
 
-function safeUserId(userId: string): string {
+export function safeUserId(userId: string): string {
   return String(userId || 'anonymous').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)
 }
 
@@ -28,6 +30,26 @@ function historyPath(userId: string): string {
   return path.join(userDir(userId), 'history.json')
 }
 
+function isHistoryItemFresh(item: ImageHistoryItem, now = Date.now()): boolean {
+  const createdAt = Date.parse(item.createdAt)
+  return Number.isFinite(createdAt) && now - createdAt < HISTORY_TTL_MS
+}
+
+function pruneHistory(items: ImageHistoryItem[], now = Date.now()): ImageHistoryItem[] {
+  return items.filter((item) => isHistoryItemFresh(item, now))
+}
+
+export async function listHistoryUserIds(): Promise<string[]> {
+  try {
+    const root = path.join(config.dataDir, 'users')
+    const entries = await fs.readdir(root, { withFileTypes: true })
+    return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  }
+}
+
 export async function ensureDataDirs() {
   await fs.mkdir(path.join(config.dataDir, 'users'), { recursive: true })
   await fs.mkdir(path.join(config.dataDir, 'tmp'), { recursive: true })
@@ -35,9 +57,15 @@ export async function ensureDataDirs() {
 
 export async function readHistory(userId: string): Promise<ImageHistoryItem[]> {
   try {
-    const raw = await fs.readFile(historyPath(userId), 'utf8')
+    const file = historyPath(userId)
+    const raw = await fs.readFile(file, 'utf8')
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    const items = Array.isArray(parsed) ? parsed : []
+    const fresh = pruneHistory(items)
+    if (fresh.length !== items.length) {
+      await fs.writeFile(file, JSON.stringify(fresh, null, 2), 'utf8')
+    }
+    return fresh
   } catch (error: any) {
     if (error?.code === 'ENOENT') return []
     throw error
@@ -50,7 +78,7 @@ export async function addHistory(userId: string, items: Omit<ImageHistoryItem, '
   const existing = await readHistory(userId)
   const now = new Date().toISOString()
   const created = items.map((item) => ({ ...item, id: nanoid(12), userId: String(userId), createdAt: now }))
-  const next = [...created, ...existing].slice(0, limit)
+  const next = pruneHistory([...created, ...existing]).slice(0, limit)
   await fs.writeFile(historyPath(userId), JSON.stringify(next, null, 2), 'utf8')
   return next
 }

@@ -39,6 +39,5 @@ export const config = {
   imageKeyName: process.env.SUB2API_IMAGE_KEY_NAME || 'OpenAI生图',
   autoCreateKey: bool('SUB2API_AUTO_CREATE_KEY', true),
 
-  chatgpt2apiBaseUrl: cleanBaseUrl(process.env.CHATGPT2API_BASE_URL || 'http://localhost:5005'),
-  chatgpt2apiTimeoutMs: num('CHATGPT2API_TIMEOUT_MS', 180000),
+  requestTimeoutMs: num('IMAGE_APP_REQUEST_TIMEOUT_MS', 180000),
 }

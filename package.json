@@ -7,8 +7,8 @@
     "dev": "concurrently -n backend,frontend -c cyan,magenta \"npm:dev:backend\" \"npm:dev:frontend\"",
     "dev:backend": "tsx watch backend/server.ts",
     "dev:frontend": "vite --host 0.0.0.0 --port 5179 frontend",
-    "build": "vite build frontend --outDir ../dist/public",
-    "start": "node dist/server.js",
+    "build": "vite build frontend --outDir ../dist/public --emptyOutDir",
+    "start": "node dist/backend/server.js",
     "build:backend": "tsc -p tsconfig.json",
     "build:all": "npm run build && npm run build:backend"
   },

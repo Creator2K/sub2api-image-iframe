@@ -50,8 +50,8 @@ async function parseJsonResponse<T>(res: Awaited<ReturnType<typeof request>>): P
 
 async function sub2Request(path: string, options: Parameters<typeof request>[1]) {
   return request(`${config.sub2apiBaseUrl}${path}`, {
-    bodyTimeout: config.chatgpt2apiTimeoutMs,
-    headersTimeout: config.chatgpt2apiTimeoutMs,
+    bodyTimeout: config.requestTimeoutMs,
+    headersTimeout: config.requestTimeoutMs,
     ...options,
   })
 }

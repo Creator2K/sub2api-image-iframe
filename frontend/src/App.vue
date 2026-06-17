@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 type Endpoint = 'generations' | 'edits'
+type ImageJobStatus = 'queued' | 'running' | 'succeeded' | 'failed'
 
 type ApiKeyOption = {
   id: number
@@ -24,6 +25,13 @@ interface HistoryItem {
   loadFailed?: boolean
 }
 
+interface PreviewImage {
+  imageUrl: string
+  proxiedUrl?: string
+  mimeType?: string
+  revisedPrompt?: string
+}
+
 interface SessionState {
   user?: { id: number; email?: string; username?: string; balance?: number; status?: string }
   imageGroup?: { id: number; name: string } | null
@@ -31,6 +39,17 @@ interface SessionState {
   apiKeys?: ApiKeyOption[]
   apiKeyError?: string
   history: HistoryItem[]
+}
+
+interface ImageJob {
+  id: string
+  status: ImageJobStatus
+  error?: string
+  statusCode?: number
+  result?: {
+    images?: unknown[]
+    history?: HistoryItem[]
+  }
 }
 
 const t = {
@@ -55,7 +74,7 @@ const t = {
   loadingUser: '\u6b63\u5728\u83b7\u53d6\u7528\u6237\u4fe1\u606f...',
   userLoadFailed: '\u7528\u6237\u4fe1\u606f\u83b7\u53d6\u5931\u8d25',
   checkingModels: '\u6b63\u5728\u68c0\u67e5\u6240\u9009\u5bc6\u94a5\u6a21\u578b\u5217\u8868...',
-  pureImageOk: '密钥选择正确，可以生成图片。 1K：1$（0.02元/张） 2K：2$ （0.04元/张） 4K：4$ （0.08元/张）',
+  pureImageOk: '密钥选择正确，可以生成图片。分辨率 1K：1$ （0.02元/张）',
   pureImageHint: '\u8bf7\u9009\u62e9\u5bf9\u5e94\u7684\u751f\u56fe\u5206\u7ec4',
   noGroup3Key: '\u672a\u627e\u5230\u751f\u56fe\u5206\u7ec4\u5bc6\u94a5\uff0c\u662f\u5426\u7acb\u5373\u521b\u5efa\uff1f',
   creatingKey: '\u6b63\u5728\u521b\u5efa\u5bc6\u94a5...',
@@ -72,7 +91,7 @@ const t = {
   uploadEdit: '\u4e0a\u4f20\u8981\u7f16\u8f91\u7684\u56fe\u7247',
   uploadSupport: '\u652f\u6301 PNG / JPG / WebP',
   size: '\u5c3a\u5bf8',
-  quality: '\u8d28\u91cf',
+  count: '\u6570\u91cf',
   exampleHero: '\u5b98\u7f51\u4e3b\u89c6\u89c9',
   examplePhoto: '\u5546\u4e1a\u6444\u5f71',
   exampleIcon: '3D \u56fe\u6807',
@@ -106,6 +125,7 @@ const loading = ref(true)
 const generating = ref(false)
 const checkingModels = ref(false)
 const creatingKey = ref(false)
+const currentJobId = ref('')
 const sessionError = ref('')
 const actionError = ref('')
 const modelError = ref('')
@@ -123,8 +143,10 @@ const showingPromptText = ref('')
 const showingError = ref(false)
 const showingErrorText = ref('')
 const failedImageIds = reactive(new Set<string>())
+const previewImages = ref<PreviewImage[]>([])
+const previewIndex = ref(0)
 
-const form = reactive({ prompt: '', model: DEFAULT_MODEL, size: '1024x1024', quality: '1K' })
+const form = reactive({ prompt: '', model: DEFAULT_MODEL, size: '1024x1024', n: 1 })
 
 const userLabel = computed(() => session.user?.username || session.user?.email || (session.user?.id ? `${t.userPrefix}${session.user.id}` : t.unknownUser))
 const balanceLabel = computed(() => typeof session.user?.balance === 'number' ? `$${session.user.balance.toFixed(4)}` : '--')
@@ -152,7 +174,7 @@ const sizeOptions = [
   { label: '3:4\uff08\u7ad6\u7248\uff09', value: '1080x1440' },
   { label: '9:16\uff08\u7ad6\u7248\uff09', value: '864x1536' },
 ]
-const qualityOptions = ['1K', '2K', '4K']
+const countOptions = [1, 2, 3, 4]
 
 function authHeaders(): HeadersInit { return { 'content-type': 'application/json', 'x-sub2api-user-id': bridge.userId, 'x-sub2api-token': bridge.token } }
 function multipartHeaders(): HeadersInit { return { 'x-sub2api-user-id': bridge.userId, 'x-sub2api-token': bridge.token } }
@@ -163,6 +185,17 @@ async function parseResponse(res: Response) {
   try { data = text ? JSON.parse(text) : null } catch { data = { error: text } }
   if (!res.ok) throw new Error(data?.message || data?.error || `HTTP ${res.status}`)
   return data
+}
+
+function friendlyErrorMessage(error: any) {
+  const message = String(error?.message || error || '')
+  if (/HTTP 504|error code:\s*504|UPSTREAM_IMAGE_TIMEOUT|timed out/i.test(message)) {
+    return '图片接口处理超时，请稍后重试；如果反复出现，建议换小一点的原图或指定较小尺寸。'
+  }
+  if (/non-JSON/i.test(message)) {
+    return '图片接口返回了异常内容，请稍后重试。'
+  }
+  return message || '请求失败，请稍后重试'
 }
 
 async function loadSession() {
@@ -211,7 +244,43 @@ async function refreshHistory() {
   session.history = data.items || []
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+async function waitForJob(jobId: string) {
+  currentJobId.value = jobId
+  while (generating.value && currentJobId.value === jobId) {
+    await sleep(3000)
+    const data = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { headers: authHeaders() }).then(parseResponse)
+    const job = data.job as ImageJob
+    if (job.status === 'succeeded') {
+      session.history = job.result?.history || []
+      previewImages.value = Array.isArray(job.result?.images)
+        ? (job.result.images as PreviewImage[]).map((item) => ({ ...item, imageUrl: item.proxiedUrl || item.imageUrl }))
+        : []
+      previewIndex.value = 0
+      selectedImage.value = session.history[0] || null
+      currentJobId.value = ''
+      return
+    }
+    if (job.status === 'failed') {
+      throw new Error(job.error || 'Image job failed')
+    }
+  }
+}
+
 function imageSrc(item: HistoryItem) { return item.proxiedUrl || item.imageUrl }
+function previewSrc(item: PreviewImage) { return item.proxiedUrl || item.imageUrl }
+function currentPreviewImage() { return previewImages.value[previewIndex.value] || null }
+function showPreviousImage() {
+  if (previewImages.value.length <= 1) return
+  previewIndex.value = (previewIndex.value - 1 + previewImages.value.length) % previewImages.value.length
+}
+function showNextImage() {
+  if (previewImages.value.length <= 1) return
+  previewIndex.value = (previewIndex.value + 1) % previewImages.value.length
+}
 function onPickFile(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0] || null
@@ -265,24 +334,25 @@ async function submit() {
     if (!form.prompt.trim()) throw new Error(t.promptRequired)
     let data: any
     const manual = hasManualKey.value ? manualApiKey.value.trim() : ''
-    const basePayload = { ...form, model: DEFAULT_MODEL, prompt: form.prompt.trim(), n: 1, size: form.size, quality: form.quality, api_key_id: manual ? undefined : Number(selectedApiKeyId.value), manual_api_key: manual }
+    const basePayload = { ...form, model: DEFAULT_MODEL, prompt: form.prompt.trim(), n: Number(form.n || 1), size: form.size, api_key_id: manual ? undefined : Number(selectedApiKeyId.value), manual_api_key: manual }
     if (endpoint.value === 'generations') {
-      data = await fetch('/api/images/generations', { method: 'POST', headers: authHeaders(), body: JSON.stringify(basePayload) }).then(parseResponse)
+      data = await fetch('/api/images/generations/jobs', { method: 'POST', headers: authHeaders(), body: JSON.stringify(basePayload) }).then(parseResponse)
     } else {
       if (!uploadFile.value) throw new Error(t.uploadRequired)
       const fd = new FormData()
       fd.append('image', uploadFile.value)
       for (const [k, v] of Object.entries(basePayload)) if (v !== undefined && v !== null && v !== '') fd.append(k, String(v))
-      data = await fetch('/api/images/edits', { method: 'POST', headers: multipartHeaders(), body: fd }).then(parseResponse)
+      data = await fetch('/api/images/edits/jobs', { method: 'POST', headers: multipartHeaders(), body: fd }).then(parseResponse)
     }
-    session.history = data.history || []
-    selectedImage.value = session.history[0] || null
+    const job = data.job as ImageJob
+    if (!job?.id) throw new Error('Image job was not created')
+    await waitForJob(job.id)
   } catch (e: any) {
-    actionError.value = e?.message || String(e)
+    actionError.value = friendlyErrorMessage(e)
     showingErrorText.value = actionError.value
     showingError.value = true
   }
-  finally { generating.value = false }
+  finally { generating.value = false; currentJobId.value = '' }
 }
 
 function useExample(text: string) { form.prompt = text }
@@ -298,6 +368,9 @@ function downloadImage(item: HistoryItem) {
 function viewPrompt(item: HistoryItem) {
   showingPromptText.value = item.prompt
   showingPrompt.value = true
+}
+function currentPreviewHistoryItem() {
+  return selectedImage.value || session.history[0] || null
 }
 function onHistoryWheel(e: WheelEvent) {
   if (e.deltaY !== 0) {
@@ -361,7 +434,7 @@ onMounted(() => {
         <div class="tabs"><button type="button" :class="{ active: endpoint === 'generations' }" @click="endpoint = 'generations'">{{ t.generateImage }}</button><button type="button" :class="{ active: endpoint === 'edits' }" @click="endpoint = 'edits'">{{ t.editImage }}</button></div>
         <label class="field prompt"><span>{{ t.prompt }}</span><textarea v-model="form.prompt" :disabled="!!sessionError" :placeholder="t.promptPlaceholder"></textarea></label>
         <div v-if="endpoint === 'edits'" class="upload"><label><input :disabled="!!sessionError" type="file" accept="image/*" @change="onPickFile" /><strong>{{ uploadName || t.uploadEdit }}</strong><small>{{ t.uploadSupport }}</small></label></div>
-        <div class="grid-fields"><label class="field"><span>{{ t.size }}</span><select v-model="form.size" :disabled="!!sessionError"><option v-for="item in sizeOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label><label class="field"><span>{{ t.quality }}</span><select v-model="form.quality" :disabled="!!sessionError"><option v-for="item in qualityOptions" :key="item" :value="item">{{ item }}</option></select></label></div>
+        <div class="grid-fields"><label class="field"><span>{{ t.size }}</span><select v-model="form.size" :disabled="!!sessionError"><option v-for="item in sizeOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label><label class="field"><span>{{ t.count }}</span><select v-model="form.n" :disabled="!!sessionError"><option v-for="item in countOptions" :key="item" :value="item">{{ item }}</option></select></label></div>
         <div class="examples">
           <button type="button" :disabled="!!sessionError" @click="useExample('赛博朋克风格的女武神，手持发光的科幻巨剑，背景是霓虹闪烁的未来都市，极其细致，8k分辨率')">赛博女武神</button>
           <button type="button" :disabled="!!sessionError" @click="useExample('一只戴着墨镜的柴犬在沙滩上冲浪，阳光明媚，写实摄影，极高画质')">冲浪柴犬</button>
@@ -391,15 +464,20 @@ onMounted(() => {
             <span class="loader-letter">G</span><span class="loader-letter">e</span><span class="loader-letter">n</span><span class="loader-letter">e</span><span class="loader-letter">r</span><span class="loader-letter">a</span><span class="loader-letter">t</span><span class="loader-letter">i</span><span class="loader-letter">n</span><span class="loader-letter">g</span>
             <div class="loader"></div>
           </div>
+          <div v-else-if="currentPreviewImage()" class="preview-stage">
+            <button v-if="previewImages.length > 1" class="preview-nav left" type="button" @click="showPreviousImage" aria-label="上一张">‹</button>
+            <img :src="previewSrc(currentPreviewImage() as PreviewImage)" alt="Generated image" v-motion :initial="{ opacity: 0, scale: 0.95 }" :enter="{ opacity: 1, scale: 1, transition: { duration: 500 } }" />
+            <button v-if="previewImages.length > 1" class="preview-nav right" type="button" @click="showNextImage" aria-label="下一张">›</button>
+          </div>
           <img v-else-if="latestImage" :src="imageSrc(latestImage)" alt="Generated image" v-motion :initial="{ opacity: 0, scale: 0.95 }" :enter="{ opacity: 1, scale: 1, transition: { duration: 500 } }" />
           <div v-else class="empty-preview">
             <div class="empty-icon" v-motion :initial="{ rotate: -180, scale: 0 }" :enter="{ rotate: 0, scale: 1, transition: { type: 'spring', stiffness: 200 } }">✨</div>
             <h2>{{ t.waitingImage }}</h2><p>{{ t.resultHere }}</p>
           </div>
-          <div v-if="latestImage && !generating" class="preview-actions">
-            <button class="action-btn" type="button" @click="viewPrompt(latestImage)" v-motion-pop-visible>查看提示词</button>
+          <div v-if="(latestImage || currentPreviewImage()) && !generating" class="preview-actions">
+            <button class="action-btn" type="button" @click="viewPrompt(currentPreviewHistoryItem() as HistoryItem)" v-motion-pop-visible>查看提示词</button>
             <button class="action-btn" type="button" @click="selectedImage = null" v-motion-pop-visible>关闭预览</button>
-            <button class="action-btn" type="button" @click="downloadImage(latestImage)" v-motion-pop-visible>{{ t.downloadOpen }}</button>
+            <button class="action-btn" type="button" @click="downloadImage(currentPreviewHistoryItem() as HistoryItem)" v-motion-pop-visible>{{ t.downloadOpen }}</button>
             <button class="action-btn" type="button" @click="refreshHistory" v-motion-pop-visible>{{ t.refreshHistory }}</button>
           </div>
         </div>

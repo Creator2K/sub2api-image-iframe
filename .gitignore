@@ -2,6 +2,13 @@
 dist/
 data/
 logs/
+.cache/
+.corepack/
+.home/
+.local/
+.npm-cache/
+.pnpm-store/
+node_modules.npm-broken/
 .env
 .env.*
 !.env.example
